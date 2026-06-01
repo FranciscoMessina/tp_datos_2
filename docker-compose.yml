@@ -35,7 +35,7 @@ services:
     restart: unless-stopped
     environment:
       NEO4J_AUTH: ${NEO_4J_USER:-neo4j}/${NEO_4J_PASSWORD:-password123}
-      NEO4J_dbms_default__database: ${NEO_4J_DATABASE:-neo4j}
+      NEO4J_initial_dbms_default__database: ${NEO_4J_DATABASE:-neo4j}
     ports:
       - "7474:7474"
       - "7687:7687"

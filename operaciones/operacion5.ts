@@ -7,7 +7,7 @@ import {
   spinner,
   text,
 } from "@clack/prompts";
-import type { AppContext } from "./db-setup.ts";
+import type { AppContext } from "../db-setup.ts";
 import {
   cerrarAlertaFraude,
   consumirProximaAlertaFraude,
@@ -100,7 +100,7 @@ export async function solicitarOperacion5(ctx: AppContext): Promise<void> {
       {
         value: "confirmado",
         label: "Fraude confirmado",
-        hint: "Etiqueta las cuentas involucradas como comprometidas en Neo4j",
+        hint: "Aplica las marcas persistentes en MongoDB y Neo4j; el bloqueo temporal en Redis permanece vigente",
       },
       {
         value: "falso_positivo",
@@ -131,7 +131,9 @@ export async function solicitarOperacion5(ctx: AppContext): Promise<void> {
   }
 
   const spinnerCierre = spinner();
-  spinnerCierre.start("Registrando cierre en MongoDB, Redis y Neo4j...");
+  spinnerCierre.start(
+    "Registrando el cierre y aplicando acciones definitivas si corresponde...",
+  );
 
   try {
     const resultado = await cerrarAlertaFraude(ctx, alertaPendiente, {
@@ -163,20 +165,24 @@ export async function solicitarOperacion5(ctx: AppContext): Promise<void> {
       );
     } else if (resultado.etiquetaNeo4jAplicada) {
       log.success(
-        "Neo4j · Cuentas involucradas etiquetadas como CuentaComprometida.",
+        "Confirmación aplicada: MongoDB dejó las cuentas bloqueadas y Neo4j etiquetó las cuentas comprometidas.",
       );
     }
   } catch (error) {
     spinnerCierre.stop("Falló OP-5.");
-    log.error(obtenerMensajeError(error));
 
     try {
       await reencolarAlertaFraudePendiente(ctx, alertaPendiente);
       log.warn("La alerta fue reencolada en Redis para no perderla.");
     } catch (requeueError) {
-      log.error(
-        `No se pudo reencolar la alerta consumida: ${obtenerMensajeError(requeueError)}`,
+      throw new Error(
+        [
+          obtenerMensajeError(error),
+          `No se pudo reencolar la alerta consumida: ${obtenerMensajeError(requeueError)}`,
+        ].join("\n"),
       );
     }
+
+    throw error;
   }
 }

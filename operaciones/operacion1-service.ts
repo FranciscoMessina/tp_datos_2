@@ -1,12 +1,12 @@
-import { config } from "./config.ts";
-import type { AppContext } from "./db-setup.ts";
-import type { Cliente, Cuenta, Transaccion } from "./estructura-datos.ts";
+import { config } from "../config.ts";
+import type { AppContext } from "../db-setup.ts";
+import type { Cliente, Cuenta, Transaccion } from "../estructura-datos.ts";
 import {
   getBlockedReason,
   getClientById,
   updateSessionLastOperation,
   type SessionData,
-} from "./session-service.ts";
+} from "../session-service.ts";
 
 type MongoTransferState = {
   origenDebitado: boolean;

@@ -1,5 +1,5 @@
 import { cancel, isCancel, log, note, spinner, text } from "@clack/prompts";
-import type { AppContext } from "./db-setup.ts";
+import type { AppContext } from "../db-setup.ts";
 import { formatearMoneda } from "./operacion1-service.ts";
 import { trazarTransferenciaRegulatoria } from "./operacion4-service.ts";
 
@@ -108,6 +108,6 @@ export async function solicitarOperacion4(ctx: AppContext): Promise<void> {
     );
   } catch (error) {
     spinnerConsulta.stop("Falló OP-4.");
-    log.error(obtenerMensajeError(error));
+    throw error;
   }
 }

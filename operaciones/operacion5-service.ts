@@ -1,6 +1,6 @@
-import { config } from "./config.ts";
-import type { AppContext } from "./db-setup.ts";
-import type { AlertaFraude, Transaccion } from "./estructura-datos.ts";
+import { config } from "../config.ts";
+import type { AppContext } from "../db-setup.ts";
+import type { AlertaFraude, Cuenta, Transaccion } from "../estructura-datos.ts";
 
 export type DictamenFraude = "confirmado" | "falso_positivo";
 
@@ -25,14 +25,30 @@ export type CierreAlertaFraudeResult = {
 
 const SECURITY_STREAM_KEY = "seguridad:stream";
 const FRAUD_ALERTS_ZSET_KEY = "alertas:fraude";
+const FRAUD_ALERT_KEY_PREFIX = "alerta:fraude:";
 
 const alertasCollection = (ctx: AppContext) =>
   ctx.db.collection<AlertaFraude>("alertas");
+const cuentasCollection = (ctx: AppContext) =>
+  ctx.db.collection<Cuenta>("cuentas");
 const transaccionesCollection = (ctx: AppContext) =>
   ctx.db.collection<Transaccion>("transacciones");
 
 function obtenerUnicos<T>(values: T[]): T[] {
   return [...new Set(values)];
+}
+
+function alertPayloadKey(alertaId: string): string {
+  return `${FRAUD_ALERT_KEY_PREFIX}${alertaId}`;
+}
+
+function normalizarAlertaDesdeRedis(raw: string): AlertaFraude {
+  const parsed = JSON.parse(raw) as AlertaFraude & { fecha: string | Date };
+
+  return {
+    ...parsed,
+    fecha: new Date(parsed.fecha),
+  };
 }
 
 async function consumirAlertaPendienteRedis(
@@ -96,6 +112,7 @@ async function obtenerCuentasInvolucradas(
 async function etiquetarCuentasComprometidasNeo4j(
   ctx: AppContext,
   cuentaIds: string[],
+  alerta: AlertaFraude,
 ): Promise<void> {
   if (cuentaIds.length === 0) {
     return;
@@ -111,9 +128,31 @@ async function etiquetarCuentasComprometidasNeo4j(
           WHERE c.id IN $cuentaIds
           SET c:CuentaComprometida,
               c.cuentaComprometida = true,
+              c.fraudeConfirmado = true,
+              c.estado = 'bloqueada',
+              c.riesgoFraude = $nivelRiesgo,
+              c.patronesFraude = CASE
+                WHEN c.patronesFraude IS NULL THEN [$tipo]
+                WHEN $tipo IN c.patronesFraude THEN c.patronesFraude
+                ELSE c.patronesFraude + $tipo
+              END,
               c.fechaCuentaComprometida = datetime()
+          WITH count(c) AS _
+          MATCH ()-[r:TRANSFIRIO {_id: $transaccionId}]->()
+          SET r.sospechosa = true,
+              r.riesgoFraude = $nivelRiesgo,
+              r.patronesFraude = CASE
+                WHEN r.patronesFraude IS NULL THEN [$tipo]
+                WHEN $tipo IN r.patronesFraude THEN r.patronesFraude
+                ELSE r.patronesFraude + $tipo
+              END
         `,
-        { cuentaIds },
+        {
+          cuentaIds,
+          transaccionId: alerta.idTransaccion,
+          tipo: alerta.tipo,
+          nivelRiesgo: alerta.nivelRiesgo,
+        },
       ),
     );
   } finally {
@@ -146,11 +185,15 @@ export async function consumirProximaAlertaFraude(
     return null;
   }
 
-  const alerta = await alertasCollection(ctx).findOne({ _id: alertaId });
+  const rawAlert = await ctx.redis.get(alertPayloadKey(alertaId));
+  const alerta =
+    rawAlert != null
+      ? normalizarAlertaDesdeRedis(rawAlert)
+      : await alertasCollection(ctx).findOne({ _id: alertaId });
 
   if (alerta == null) {
     throw new Error(
-      `Redis devolvió la alerta ${alertaId}, pero no existe en MongoDB.`,
+      `Redis devolvió la alerta ${alertaId}, pero no se encontró ni en Redis ni en MongoDB.`,
     );
   }
 
@@ -164,6 +207,11 @@ export async function reencolarAlertaFraudePendiente(
   ctx: AppContext,
   alertaPendiente: AlertaFraudePendiente,
 ): Promise<void> {
+  await ctx.redis.set(
+    alertPayloadKey(alertaPendiente.alerta._id),
+    JSON.stringify(alertaPendiente.alerta),
+  );
+
   await ctx.redis.zAdd(FRAUD_ALERTS_ZSET_KEY, {
     score: alertaPendiente.alerta.nivelRiesgo,
     value: alertaPendiente.alerta._id,
@@ -177,36 +225,43 @@ export async function cerrarAlertaFraude(
 ): Promise<CierreAlertaFraudeResult> {
   const fechaCierre = new Date();
   const { alerta, cuentasInvolucradas } = alertaPendiente;
+  const resolucion = {
+    fecha: fechaCierre,
+    estado: input.dictamen,
+    accionesTomadas: input.accionesTomadas.trim(),
+    analista: input.analista.trim(),
+  } as const;
+
+  const alertaCerrada: AlertaFraude = {
+    ...alerta,
+    estado: "cerrada",
+    cuentasInvolucradas,
+    resolucion,
+  };
+
+  const etiquetaNeo4jAplicada = input.dictamen === "confirmado";
+
+  if (etiquetaNeo4jAplicada && cuentasInvolucradas.length > 0) {
+    await cuentasCollection(ctx).updateMany(
+      { _id: { $in: cuentasInvolucradas } },
+      { $set: { estado: "bloqueada" } },
+    );
+
+    await etiquetarCuentasComprometidasNeo4j(ctx, cuentasInvolucradas, alerta);
+  }
+
+  await alertasCollection(ctx).updateOne(
+    { _id: alerta._id },
+    {
+      $set: alertaCerrada,
+    },
+    { upsert: true },
+  );
 
   const cuentasDesbloqueadas =
     input.dictamen === "falso_positivo"
       ? await desbloquearCuentasRedis(ctx, cuentasInvolucradas)
       : [];
-
-  const updateResult = await alertasCollection(ctx).updateOne(
-    { _id: alerta._id },
-    {
-      $set: {
-        estado: "cerrada",
-        cuentasInvolucradas,
-        resolucion: {
-          fecha: fechaCierre,
-          estado: input.dictamen,
-          accionesTomadas: input.accionesTomadas.trim(),
-          analista: input.analista.trim(),
-        },
-      },
-    },
-  );
-
-  if (updateResult.modifiedCount !== 1) {
-    throw new Error("No se pudo registrar el dictamen en MongoDB.");
-  }
-
-  const etiquetaNeo4jAplicada = input.dictamen === "confirmado";
-  if (etiquetaNeo4jAplicada) {
-    await etiquetarCuentasComprometidasNeo4j(ctx, cuentasInvolucradas);
-  }
 
   const streamEventId = await ctx.redis.xAdd(SECURITY_STREAM_KEY, "*", {
     evento: "alerta_fraude_cerrada",
@@ -220,18 +275,10 @@ export async function cerrarAlertaFraude(
     fecha: fechaCierre.toISOString(),
   });
 
+  await ctx.redis.del(alertPayloadKey(alerta._id));
+
   return {
-    alerta: {
-      ...alerta,
-      estado: "cerrada",
-      cuentasInvolucradas,
-      resolucion: {
-        fecha: fechaCierre,
-        estado: input.dictamen,
-        accionesTomadas: input.accionesTomadas.trim(),
-        analista: input.analista.trim(),
-      },
-    },
+    alerta: alertaCerrada,
     cuentasInvolucradas,
     cuentasDesbloqueadas,
     etiquetaNeo4jAplicada,

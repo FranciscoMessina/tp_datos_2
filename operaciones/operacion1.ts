@@ -7,7 +7,7 @@ import {
   spinner,
   text,
 } from "@clack/prompts";
-import type { AppContext } from "./db-setup.ts";
+import type { AppContext } from "../db-setup.ts";
 import {
   DEFAULT_TRANSFER_DESCRIPTION,
   ejecutarTransferencia,
@@ -15,7 +15,7 @@ import {
   obtenerContextoClienteOperacion1,
   validarSolicitudTransferencia,
 } from "./operacion1-service.ts";
-import { ensureSession, type SessionState } from "./session-service.ts";
+import { ensureSession, type SessionState } from "../session-service.ts";
 
 function obtenerMensajeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -231,6 +231,6 @@ export async function solicitarOperacion1(
     );
   } catch (error) {
     spinnerTransferencia.stop("Falló la transferencia.");
-    log.error(obtenerMensajeError(error));
+    throw error;
   }
 }

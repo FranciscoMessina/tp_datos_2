@@ -1,6 +1,6 @@
-import { config } from "./config.ts";
-import type { AppContext } from "./db-setup.ts";
-import type { AlertaFraude, Cuenta, Transaccion } from "./estructura-datos.ts";
+import { config } from "../config.ts";
+import type { AppContext } from "../db-setup.ts";
+import type { AlertaFraude, Cuenta, Transaccion } from "../estructura-datos.ts";
 
 export type FraudPatternType =
   | "ciclo"
@@ -24,7 +24,7 @@ export type FraudSearchResult = {
   patrones: FraudPattern[];
   cuentasInvolucradas: Cuenta[];
   alertas: AlertaFraude[];
-  fraudeConfirmado: boolean;
+  bloqueoTemporalAplicado: boolean;
 };
 
 export type FraudAnalysisResult = FraudSearchResult & {
@@ -38,16 +38,15 @@ export type TransferChain = {
   saltos: number;
 };
 
-type CompensationState = {
-  mongoAccountsBefore: Array<{ _id: string; estado: Cuenta["estado"] }>;
-  mongoAlertsInserted: string[];
-  neo4jMarked: boolean;
+type RedisAlertPublicationState = {
   redisBlocks: string[];
   redisAlertsPublished: string[];
+  redisAlertPayloads: string[];
 };
 
 const SECURITY_STREAM_KEY = "seguridad:stream";
 const FRAUD_ALERTS_ZSET_KEY = "alertas:fraude";
+const FRAUD_ALERT_KEY_PREFIX = "alerta:fraude:";
 const BLOCK_TTL_SECONDS = 24 * 60 * 60;
 const SMURFING_MAX_MONTO = 50_000;
 const SMURFING_MIN_TRANSFERENCIAS = 3;
@@ -56,8 +55,6 @@ const cuentasCollection = (ctx: AppContext) =>
   ctx.db.collection<Cuenta>("cuentas");
 const transaccionesCollection = (ctx: AppContext) =>
   ctx.db.collection<Transaccion>("transacciones");
-const alertasCollection = (ctx: AppContext) =>
-  ctx.db.collection<AlertaFraude>("alertasFraude");
 
 function obtenerMensajeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -254,84 +251,31 @@ function construirAlertas(patrones: FraudPattern[]): AlertaFraude[] {
     }));
 }
 
-async function marcarFraudeEnNeo4j(
-  ctx: AppContext,
-  patrones: FraudPattern[],
-): Promise<void> {
-  const cuentaIds = obtenerUnicos(
-    patrones.flatMap((pattern) => pattern.cuentasInvolucradas),
-  );
-  const transaccionIds = obtenerUnicos(
-    patrones.flatMap((pattern) => pattern.transaccionesInvolucradas),
-  );
-  const tipos = obtenerUnicos(patrones.map((pattern) => pattern.tipo));
-  const maxRiesgo = Math.max(...patrones.map((pattern) => pattern.nivelRiesgo));
-  const session = ctx.neo4j.session({ database: config.NEO_4J_DATABASE });
-
-  try {
-    await session.executeWrite((tx) =>
-      tx.run(
-        `
-          MATCH (c:Cuenta)
-          WHERE c.id IN $cuentaIds
-          SET c.fraudeConfirmado = true,
-              c.estado = 'bloqueada',
-              c.riesgoFraude = $maxRiesgo,
-              c.patronesFraude = $tipos,
-              c.fechaMarcadoFraude = datetime()
-          WITH count(c) AS _
-          MATCH ()-[r:TRANSFIRIO]->()
-          WHERE r._id IN $transaccionIds
-          SET r.sospechosa = true,
-              r.patronesFraude = $tipos,
-              r.riesgoFraude = $maxRiesgo
-        `,
-        { cuentaIds, transaccionIds, tipos, maxRiesgo },
-      ),
-    );
-  } finally {
-    await session.close();
-  }
+function alertPayloadKey(alertaId: string): string {
+  return `${FRAUD_ALERT_KEY_PREFIX}${alertaId}`;
 }
 
-async function desmarcarFraudeEnNeo4j(
+async function revertirPublicacionRedis(
   ctx: AppContext,
-  patrones: FraudPattern[],
-): Promise<void> {
-  const cuentaIds = obtenerUnicos(
-    patrones.flatMap((pattern) => pattern.cuentasInvolucradas),
-  );
-  const transaccionIds = obtenerUnicos(
-    patrones.flatMap((pattern) => pattern.transaccionesInvolucradas),
-  );
-  const session = ctx.neo4j.session({ database: config.NEO_4J_DATABASE });
-
-  try {
-    await session.executeWrite((tx) =>
-      tx.run(
-        `
-          MATCH (c:Cuenta)
-          WHERE c.id IN $cuentaIds
-          REMOVE c.fraudeConfirmado, c.riesgoFraude, c.patronesFraude, c.fechaMarcadoFraude
-          WITH count(c) AS _
-          MATCH ()-[r:TRANSFIRIO]->()
-          WHERE r._id IN $transaccionIds
-          REMOVE r.sospechosa, r.patronesFraude, r.riesgoFraude
-        `,
-        { cuentaIds, transaccionIds },
-      ),
-    );
-  } finally {
-    await session.close();
-  }
-}
-
-async function compensar(
-  ctx: AppContext,
-  state: CompensationState,
-  patrones: FraudPattern[],
+  state: RedisAlertPublicationState,
 ): Promise<void> {
   const errors: string[] = [];
+
+  for (const alertaId of state.redisAlertsPublished) {
+    try {
+      await ctx.redis.zRem(FRAUD_ALERTS_ZSET_KEY, alertaId);
+    } catch (error) {
+      errors.push(`Redis zset ${alertaId}: ${obtenerMensajeError(error)}`);
+    }
+  }
+
+  for (const alertKey of state.redisAlertPayloads) {
+    try {
+      await ctx.redis.del(alertKey);
+    } catch (error) {
+      errors.push(`Redis payload ${alertKey}: ${obtenerMensajeError(error)}`);
+    }
+  }
 
   for (const cuentaId of state.redisBlocks) {
     try {
@@ -341,51 +285,20 @@ async function compensar(
     }
   }
 
-  if (state.mongoAlertsInserted.length > 0) {
-    try {
-      await alertasCollection(ctx).deleteMany({
-        _id: { $in: state.mongoAlertsInserted },
-      });
-    } catch (error) {
-      errors.push(`Mongo alertas: ${obtenerMensajeError(error)}`);
-    }
-  }
-
-  for (const account of state.mongoAccountsBefore) {
-    try {
-      await cuentasCollection(ctx).updateOne(
-        { _id: account._id },
-        { $set: { estado: account.estado } },
-      );
-    } catch (error) {
-      errors.push(`Mongo cuenta ${account._id}: ${obtenerMensajeError(error)}`);
-    }
-  }
-
-  if (state.neo4jMarked) {
-    try {
-      await desmarcarFraudeEnNeo4j(ctx, patrones);
-    } catch (error) {
-      errors.push(`Neo4j: ${obtenerMensajeError(error)}`);
-    }
-  }
-
   if (errors.length > 0) {
     throw new Error(errors.join(" | "));
   }
 }
 
-async function aplicarAccionesDeFraudeConfirmado(
+async function aplicarBloqueoPreventivoYPublicarAlertas(
   ctx: AppContext,
   patrones: FraudPattern[],
   alertas: AlertaFraude[],
 ): Promise<void> {
-  const state: CompensationState = {
-    mongoAccountsBefore: [],
-    mongoAlertsInserted: [],
-    neo4jMarked: false,
+  const state: RedisAlertPublicationState = {
     redisBlocks: [],
     redisAlertsPublished: [],
+    redisAlertPayloads: [],
   };
   const cuentaIds = obtenerUnicos(
     patrones.flatMap((pattern) => pattern.cuentasInvolucradas),
@@ -393,22 +306,6 @@ async function aplicarAccionesDeFraudeConfirmado(
   const blockReason = construirMotivoBloqueo(patrones);
 
   try {
-    const accountsBefore = await cuentasCollection(ctx)
-      .find({ _id: { $in: cuentaIds } }, { projection: { _id: 1, estado: 1 } })
-      .toArray();
-    state.mongoAccountsBefore = accountsBefore.map((account) => ({
-      _id: account._id,
-      estado: account.estado,
-    }));
-
-    await cuentasCollection(ctx).updateMany(
-      { _id: { $in: cuentaIds } },
-      { $set: { estado: "bloqueada" } },
-    );
-
-    await marcarFraudeEnNeo4j(ctx, patrones);
-    state.neo4jMarked = true;
-
     for (const cuentaId of cuentaIds) {
       await ctx.redis.set(`bloqueo:${cuentaId}`, blockReason, {
         EX: BLOCK_TTL_SECONDS,
@@ -416,42 +313,41 @@ async function aplicarAccionesDeFraudeConfirmado(
       state.redisBlocks.push(cuentaId);
     }
 
-    if (alertas.length > 0) {
-      await alertasCollection(ctx).insertMany(alertas);
-      state.mongoAlertsInserted = alertas.map((alerta) => alerta._id);
-    }
-
     for (const alerta of alertas) {
+      const payloadKey = alertPayloadKey(alerta._id);
+      await ctx.redis.set(payloadKey, JSON.stringify(alerta));
+      state.redisAlertPayloads.push(payloadKey);
+
       await ctx.redis.zAdd(FRAUD_ALERTS_ZSET_KEY, {
         score: alerta.nivelRiesgo,
         value: alerta._id,
       });
+      state.redisAlertsPublished.push(alerta._id);
 
       await ctx.redis.xAdd(SECURITY_STREAM_KEY, "*", {
-        evento: "alerta_fraude_confirmado",
+        evento: "alerta_fraude_detectada",
         alertaId: alerta._id,
         transaccionId: alerta.idTransaccion,
         tipo: alerta.tipo,
         riesgo: String(alerta.nivelRiesgo),
-        cuentas: cuentaIds.join(","),
+        cuentas: (alerta.cuentasInvolucradas ?? []).join(","),
         fecha: alerta.fecha.toISOString(),
       });
-      state.redisAlertsPublished.push(alerta._id);
     }
   } catch (error) {
     try {
-      await compensar(ctx, state, patrones);
+      await revertirPublicacionRedis(ctx, state);
     } catch (rollbackError) {
       throw new Error(
         [
           `Error principal OP-2: ${obtenerMensajeError(error)}`,
-          `Error de compensación OP-2: ${obtenerMensajeError(rollbackError)}`,
+          `Error de compensación Redis OP-2: ${obtenerMensajeError(rollbackError)}`,
         ].join("\n"),
       );
     }
 
     throw new Error(
-      `OP-2 falló y se compensaron los cambios: ${obtenerMensajeError(error)}`,
+      `OP-2 falló y se revirtieron los cambios temporales en Redis: ${obtenerMensajeError(error)}`,
     );
   }
 }
@@ -688,7 +584,7 @@ async function buscarDestinatariosInusuales(
 
 export async function buscarFraudePorTipo(
   ctx: AppContext,
-  input: { tipo: FraudPatternType; maxHops: number; confirmarFraude: boolean },
+  input: { tipo: FraudPatternType; maxHops: number },
 ): Promise<FraudSearchResult> {
   let patrones: FraudPattern[] = [];
   let historialMongo: Transaccion[] = [];
@@ -724,8 +620,8 @@ export async function buscarFraudePorTipo(
           .find({ _id: { $in: cuentaIds } }, { sort: { numero: 1 } })
           .toArray();
 
-  if (input.confirmarFraude && patrones.length > 0) {
-    await aplicarAccionesDeFraudeConfirmado(ctx, patrones, alertas);
+  if (patrones.length > 0) {
+    await aplicarBloqueoPreventivoYPublicarAlertas(ctx, patrones, alertas);
   }
 
   return {
@@ -735,13 +631,13 @@ export async function buscarFraudePorTipo(
     patrones,
     cuentasInvolucradas,
     alertas,
-    fraudeConfirmado: input.confirmarFraude && patrones.length > 0,
+    bloqueoTemporalAplicado: patrones.length > 0,
   };
 }
 
 export async function analizarYGestionarFraude(
   ctx: AppContext,
-  input: { transaccionId: string; maxHops: number; confirmarFraude: boolean },
+  input: { transaccionId: string; maxHops: number },
 ): Promise<FraudAnalysisResult> {
   const transaccion = await obtenerTransferenciaOError(
     ctx,
@@ -773,8 +669,8 @@ export async function analizarYGestionarFraude(
     .find({ _id: { $in: cuentaIds } }, { sort: { numero: 1 } })
     .toArray();
 
-  if (input.confirmarFraude && patrones.length > 0) {
-    await aplicarAccionesDeFraudeConfirmado(ctx, patrones, alertas);
+  if (patrones.length > 0) {
+    await aplicarBloqueoPreventivoYPublicarAlertas(ctx, patrones, alertas);
   }
 
   return {
@@ -785,6 +681,6 @@ export async function analizarYGestionarFraude(
     patrones,
     cuentasInvolucradas,
     alertas,
-    fraudeConfirmado: input.confirmarFraude && patrones.length > 0,
+    bloqueoTemporalAplicado: patrones.length > 0,
   };
 }

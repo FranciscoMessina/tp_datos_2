@@ -1,6 +1,6 @@
-import { config } from "./config.ts";
-import type { AppContext } from "./db-setup.ts";
-import type { Cuenta, Transaccion } from "./estructura-datos.ts";
+import { config } from "../config.ts";
+import type { AppContext } from "../db-setup.ts";
+import type { Cuenta, Transaccion } from "../estructura-datos.ts";
 
 export type CaminoTransferencia = {
   cuentas: string[];

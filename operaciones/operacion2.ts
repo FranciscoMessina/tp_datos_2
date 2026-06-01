@@ -1,6 +1,5 @@
 import {
   cancel,
-  confirm,
   isCancel,
   log,
   note,
@@ -8,7 +7,7 @@ import {
   spinner,
   text,
 } from "@clack/prompts";
-import type { AppContext } from "./db-setup.ts";
+import type { AppContext } from "../db-setup.ts";
 import { formatearMoneda } from "./operacion1-service.ts";
 import {
   buscarFraudePorTipo,
@@ -83,17 +82,6 @@ export async function solicitarOperacion2(ctx: AppContext): Promise<void> {
     maxHops = Number(maxHopsRaw);
   }
 
-  const confirmarFraude = await confirm({
-    message:
-      "Si se encuentran casos, ¿confirmar fraude y bloquear/marcar las cuentas involucradas?",
-    initialValue: false,
-  });
-
-  if (esCancelado(confirmarFraude)) {
-    cancel("OP-2 cancelada.");
-    return;
-  }
-
   const spinnerBusqueda = spinner();
   spinnerBusqueda.start(`Buscando patrón ${tipoFraude}...`);
 
@@ -101,7 +89,6 @@ export async function solicitarOperacion2(ctx: AppContext): Promise<void> {
     const resultado = await buscarFraudePorTipo(ctx, {
       tipo: tipoFraude as FraudPatternType,
       maxHops,
-      confirmarFraude,
     });
 
     spinnerBusqueda.stop("Búsqueda finalizada.");
@@ -159,17 +146,15 @@ export async function solicitarOperacion2(ctx: AppContext): Promise<void> {
       "Alertas ordenadas por riesgo",
     );
 
-    if (resultado.fraudeConfirmado) {
+    if (resultado.bloqueoTemporalAplicado) {
       log.success(
-        "Fraude confirmado: cuentas bloqueadas en MongoDB/Redis, grafo marcado en Neo4j y alertas publicadas en seguridad:stream.",
+        "Se aplicó el bloqueo temporal en Redis y las alertas quedaron encoladas para revisión del analista en OP-5.",
       );
     } else {
-      log.warn(
-        "Se encontraron casos sospechosos, pero no se confirmó fraude ni se aplicaron bloqueos.",
-      );
+      log.warn("No se detectaron casos para bloquear temporalmente.");
     }
   } catch (error) {
     spinnerBusqueda.stop("Falló OP-2.");
-    log.error(obtenerMensajeError(error));
+    throw error;
   }
 }

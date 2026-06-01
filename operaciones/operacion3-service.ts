@@ -1,7 +1,7 @@
-import { config } from "./config.ts";
-import type { AppContext } from "./db-setup.ts";
-import type { Cliente, Cuenta, Transaccion } from "./estructura-datos.ts";
-import { getBlockedReason, getClientById } from "./session-service.ts";
+import { config } from "../config.ts";
+import type { AppContext } from "../db-setup.ts";
+import type { Cliente, Cuenta, Transaccion } from "../estructura-datos.ts";
+import { getBlockedReason, getClientById } from "../session-service.ts";
 
 export type TransaccionConSaldo = {
   transaccion: Transaccion;

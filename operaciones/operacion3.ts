@@ -1,11 +1,11 @@
 import { cancel, isCancel, log, note, select, spinner } from "@clack/prompts";
-import type { AppContext } from "./db-setup.ts";
+import type { AppContext } from "../db-setup.ts";
 import { formatearMoneda } from "./operacion1-service.ts";
 import {
   consultarExtractoCuenta,
   obtenerContextoClienteOperacion3,
 } from "./operacion3-service.ts";
-import { ensureSession, type SessionState } from "./session-service.ts";
+import { ensureSession, type SessionState } from "../session-service.ts";
 
 function obtenerMensajeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -145,6 +145,6 @@ export async function solicitarOperacion3(
     );
   } catch (error) {
     spinnerConsulta.stop("Falló OP-3.");
-    log.error(obtenerMensajeError(error));
+    throw error;
   }
 }
