@@ -6,6 +6,7 @@
       "name": "datos_tp",
       "dependencies": {
         "@clack/prompts": "^1.5.0",
+        "@faker-js/faker": "^10.4.0",
         "mongodb": "^7.2.0",
         "neo4j-driver": "^6.0.1",
         "redis": "^6.0.0",
@@ -22,6 +23,8 @@
     "@clack/core": ["@clack/core@1.4.0", "", { "dependencies": { "fast-wrap-ansi": "^0.2.0", "sisteransi": "^1.0.5" } }, "sha512-7Wctjq6f7c1CPz8sPpkwUnz8yRgVANkpNupb81q432FjcJg4l+Sw7XANdNSdWfAKq0IHI0JTcUeK5dxs/HrGPw=="],
 
     "@clack/prompts": ["@clack/prompts@1.5.0", "", { "dependencies": { "@clack/core": "1.4.0", "fast-string-width": "^3.0.2", "fast-wrap-ansi": "^0.2.0", "sisteransi": "^1.0.5" } }, "sha512-wKh+wTjmrUoUdkZg8KpJO5X+p9PWV+KE9mePseq9UYWkukgTKsGS47RRL2HstwVcvDQH+PenrPJWII8+MfiiyA=="],
+
+    "@faker-js/faker": ["@faker-js/faker@10.4.0", "", {}, "sha512-sDBWI3yLy8EcDzgobvJTWq1MJYzAkQdpjXuPukga9wXonhpMRvd1Izuo2Qgwey2OiEoRIBr35RMU9HJRoOHzpw=="],
 
     "@mongodb-js/saslprep": ["@mongodb-js/saslprep@1.4.11", "", { "dependencies": { "sparse-bitfield": "^3.0.3" } }, "sha512-o9rAHc0IpIjuPSxRutWpE1F62x7n+4mVS4rCNHkzhIUMQcc18bb6xEq5wd2NdN0WjepIyXIppRshYI2kQDOZVA=="],
 

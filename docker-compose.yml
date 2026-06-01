@@ -1,0 +1,50 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: datos_tp-redis
+    restart: unless-stopped
+    command:
+      [
+        "redis-server",
+        "--appendonly",
+        "yes",
+        "--requirepass",
+        "${REDIS_PASSWORD:-redispass}",
+      ]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  mongodb:
+    image: mongo:7
+    container_name: datos_tp-mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-admin123}
+      MONGO_INITDB_DATABASE: ${MONGO_DB_NAME:-datos_tp}
+    ports:
+      - "27018:27017"
+    volumes:
+      - mongo_data:/data/db
+
+  neo4j:
+    image: neo4j:5-community
+    container_name: datos_tp-neo4j
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: ${NEO_4J_USER:-neo4j}/${NEO_4J_PASSWORD:-password123}
+      NEO4J_dbms_default__database: ${NEO_4J_DATABASE:-neo4j}
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+
+volumes:
+  redis_data:
+  mongo_data:
+  neo4j_data:
+  neo4j_logs:
